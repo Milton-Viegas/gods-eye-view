@@ -1,0 +1,80 @@
+{
+  "type": "FeatureCollection",
+  "features": [
+    {
+      "type": "Feature",
+      "geometry": { "type": "Point", "coordinates": [-46.6625, -23.5618] },
+      "properties": {
+        "id": "sp-jardins-001",
+        "title": "Apartamento Alameda Santos",
+        "neighborhood": "Jardins",
+        "type": "apartamento",
+        "m2": 186,
+        "priceBRL": 4250000,
+        "status": "venda",
+        "photoUrl": "https://placehold.co/640x400/1a1a1a/c9a227?text=Jardins",
+        "url": "https://viegas-rebroker.com.br"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": { "type": "Point", "coordinates": [-46.6815, -23.5865] },
+      "properties": {
+        "id": "sp-itaim-002",
+        "title": "Cobertura Faria Lima",
+        "neighborhood": "Itaim",
+        "type": "cobertura",
+        "m2": 320,
+        "priceBRL": 9800000,
+        "status": "venda",
+        "photoUrl": "https://placehold.co/640x400/1a1a1a/c9a227?text=Itaim",
+        "url": "https://viegas-rebroker.com.br"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": { "type": "Point", "coordinates": [-46.6915, -23.5675] },
+      "properties": {
+        "id": "sp-pinheiros-003",
+        "title": "Apartamento Rua dos Pinheiros",
+        "neighborhood": "Pinheiros",
+        "type": "apartamento",
+        "m2": 98,
+        "priceBRL": 12000,
+        "status": "locacao",
+        "photoUrl": "https://placehold.co/640x400/1a1a1a/c9a227?text=Pinheiros",
+        "url": "https://viegas-rebroker.com.br"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": { "type": "Point", "coordinates": [-46.7205, -23.6185] },
+      "properties": {
+        "id": "sp-morumbi-004",
+        "title": "Casa Av. Giovanni Gronchi",
+        "neighborhood": "Morumbi",
+        "type": "casa",
+        "m2": 450,
+        "priceBRL": 6500000,
+        "status": "venda",
+        "photoUrl": "https://placehold.co/640x400/1a1a1a/c9a227?text=Morumbi",
+        "url": "https://viegas-rebroker.com.br"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": { "type": "Point", "coordinates": [-46.6685, -23.5925] },
+      "properties": {
+        "id": "sp-itaim-005",
+        "title": "Apartamento Vila Nova Conceição",
+        "neighborhood": "Itaim",
+        "type": "apartamento",
+        "m2": 145,
+        "priceBRL": 3100000,
+        "status": "venda",
+        "photoUrl": null,
+        "url": "#"
+      }
+    }
+  ]
+}
