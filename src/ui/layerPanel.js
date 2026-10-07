@@ -42,6 +42,7 @@ const PANEL_GROUPS = [
       'local-datacenters',
       'telegeography-submarine-cables',
       'local-dams',
+      'listings-sp',
     ],
   },
   {
@@ -76,6 +77,7 @@ const PANEL_LABELS = {
   'alpr-cameras': 'Mapped ALPR Cameras',
   'local-datacenters': 'Data Centers',
   'local-firms': 'Active Fires',
+  'listings-sp': 'SP Listings (Viegas)',
 };
 
 function panelLabel(layer) {
