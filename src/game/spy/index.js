@@ -18,6 +18,8 @@ import {
   recordBestScore,
   timeBonus,
 } from './engine.js';
+import { readProgress, recordMissionResult, tierLabel } from './difficulty.js';
+import { createLeaderboardClient } from './leaderboardClient.js';
 import { createSpyHud } from './hud.js';
 import './spy.css';
 
@@ -39,12 +41,26 @@ function safeStorage(windowRef) {
 
 function sanitizeCodename(value) {
   const clean = String(value ?? '')
+    .replace(/<[^>]*>/g, ' ')
     .toUpperCase()
-    .replace(/[^\p{L}\p{N} -]/gu, '')
+    .replace(/[^\p{L}\p{N} ._-]/gu, '')
     .replace(/\s+/g, ' ')
     .trim()
-    .slice(0, 18);
+    .slice(0, 20)
+    .trim();
   return clean || null;
+}
+
+/** Ganchos de automação (guess/state) só em dev ou com ?spytest=1 — e aí o ranking fica desligado. */
+function isTestMode(windowRef) {
+  let dev = false;
+  try {
+    dev = Boolean(import.meta.env?.DEV);
+  } catch {
+    dev = false;
+  }
+  const params = new URLSearchParams(windowRef.location?.search ?? '');
+  return dev || params.get('spytest') === '1';
 }
 
 function randomCodename(random = Math.random) {
@@ -66,6 +82,14 @@ export function mountSpyGame({
   const scene = viewer.scene;
   const storage = safeStorage(windowRef);
   const engine = createSpyEngine({ missions: SPY_MISSIONS });
+  const testMode = isTestMode(windowRef);
+  const leaderboard = createLeaderboardClient({
+    fetchImpl: windowRef.fetch?.bind(windowRef),
+    enabled: !testMode,
+  });
+  /** Registro da partida atual no Ranking Global: {promise, runId, summary, submitted}. */
+  let run = null;
+  let rankingRequest = 0;
 
   let codename =
     sanitizeCodename(storage?.getItem(CODENAME_KEY)) || randomCodename();
@@ -93,7 +117,7 @@ export function mountSpyGame({
     handlers: {
       onOpen: () => openBriefing(),
       onConsole: () => closeToConsole(),
-      onStart: (missionId, name) => startMission(missionId, name),
+      onStart: (choice, name) => startMission(choice, name),
       onHint: () => useHint(),
       onReveal: () => revealTarget(),
       onAbort: () => abortMission(),
@@ -109,6 +133,20 @@ export function mountSpyGame({
         } catch {
           /* sem armazenamento */
         }
+      },
+      onRankingRequest: (filter) => loadRanking(filter),
+      onSubmitRetry: () => submitRun(),
+      onShowRanking: () => {
+        const summary = run?.summary;
+        clearMarkers();
+        hud.hideDebrief();
+        hud.hideMission();
+        openBriefing({
+          tab: 'ranking',
+          filter: summary
+            ? { mission: summary.mission.id, tier: summary.tier }
+            : undefined,
+        });
       },
       onRerollCodename: () => {
         let next = randomCodename();
@@ -275,15 +313,27 @@ export function mountSpyGame({
   }
 
   // ── Fluxo do jogo ──────────────────────────────────────────────
-  function openBriefing() {
+  function openBriefing({ tab, filter } = {}) {
     if (engine.phase === 'playing') return;
     hud.hideDebrief();
     hud.showBriefing({
       codename,
       best: readBestScore(storage),
       autoOpen: storage?.getItem(AUTO_OPEN_KEY) !== 'off',
+      progress: readProgress(storage),
+      tab: tab ?? 'missions',
+      filter,
+      testMode,
     });
     setBodyState();
+  }
+
+  function loadRanking({ mission = 'all', tier = 'all' } = {}) {
+    const ticket = ++rankingRequest;
+    leaderboard.fetchTop({ mission, tier, limit: 20 }).then((result) => {
+      if (ticket !== rankingRequest) return;
+      hud.setRanking(result, { highlight: codename });
+    });
   }
 
   function closeToConsole() {
@@ -302,7 +352,10 @@ export function mountSpyGame({
       hud.setStatus({
         elapsedMs: engine.elapsedMs(),
         score: engine.score,
-        bonus: timeBonus(engine.stepElapsedS()),
+        bonus: Math.round(
+          timeBonus(engine.stepElapsedS(), engine.scoring) *
+            engine.scoring.multiplier,
+        ),
       });
     tick();
     tickTimer = windowRef.setInterval(tick, 250);
@@ -321,10 +374,30 @@ export function mountSpyGame({
       index: engine.stepIndex,
       total: engine.mission.targets.length,
     });
+    refreshHintButton();
     hud.log(`Nova pista recebida (alvo ${engine.stepIndex + 1}).`, 'info');
   }
 
-  function startMission(missionId, name) {
+  function refreshHintButton() {
+    const penalties = engine.scoring.hintPenalties;
+    if (!penalties.length) {
+      hud.setHintCost(null);
+      return;
+    }
+    const left = engine.hintsLeft();
+    hud.setHintCost(
+      penalties[Math.min(penalties.length - 1, engine.stepHints)],
+    );
+    hud.setHintAvailable(left > 0);
+  }
+
+  function startMission(choice, name) {
+    const {
+      missionId = 'random',
+      tier,
+      campaign = true,
+      pool,
+    } = typeof choice === 'string' ? { missionId: choice } : (choice ?? {});
     codename = sanitizeCodename(name) || codename;
     try {
       storage?.setItem(CODENAME_KEY, codename);
@@ -332,17 +405,31 @@ export function mountSpyGame({
       /* sem armazenamento */
     }
     clearMarkers();
+    const poolMissions = Array.isArray(pool)
+      ? SPY_MISSIONS.filter((m) => pool.includes(m.id))
+      : null;
     const mission = engine.start(
       missionId === 'random' ? undefined : missionId,
+      { tier, campaign, pool: poolMissions },
     );
+    run = {
+      missionId: mission.id,
+      tier: engine.tier,
+      promise: leaderboard.startRun({
+        missionId: mission.id,
+        tier: engine.tier,
+      }),
+      summary: null,
+      submitted: false,
+    };
     hud.hideBriefing();
     hud.hideDebrief();
-    hud.showMission({ mission, codename });
+    hud.showMission({ mission, codename, tier: engine.tier });
     pointerLease = claimPointer(POINTER_OWNER);
     busy = false;
     flyToSaoPaulo();
     hud.log(
-      `Canal seguro aberto. ${mission.codename}: ${mission.title}.`,
+      `Canal seguro aberto. ${mission.codename}: ${mission.title}. ${tierLabel(engine.tier)}.`,
       'system',
     );
     presentCurrentClue();
@@ -382,8 +469,9 @@ export function mountSpyGame({
         label: `✔ ${target.name}`,
       });
       hud.setThermo({ level: 'found', label: 'NO ALVO' }, result.distance);
+      const mult = engine.scoring.multiplier;
       hud.toast(
-        `ALVO LOCALIZADO! +${result.points} pts (bônus ${result.bonus})`,
+        `ALVO LOCALIZADO! +${result.points} pts (bônus ${result.bonus}${mult !== 1 ? ` · ×${String(mult).replace('.', ',')}` : ''})`,
         'success',
         2800,
       );
@@ -413,6 +501,13 @@ export function mountSpyGame({
     if (engine.phase !== 'playing' || busy) return;
     const result = engine.hint();
     if (!result) return;
+    if (result.unavailable) {
+      hud.toast(
+        'Nível sem dicas. Use REVELAR (0 pts) se estiver perdido.',
+        'warm',
+      );
+      return;
+    }
     if (result.exhausted) {
       hud.toast(
         'Sem mais dicas para este alvo. Use REVELAR se estiver perdido.',
@@ -438,8 +533,8 @@ export function mountSpyGame({
         orientation: { heading: 0, pitch: Cesium.Math.toRadians(-90), roll: 0 },
         duration: 2.2,
       });
-      hud.setHintAvailable(false);
     }
+    refreshHintButton();
   }
 
   function revealTarget() {
@@ -496,9 +591,68 @@ export function mountSpyGame({
         codename,
         at: new Date().toISOString(),
       });
+    const { unlocked } = recordMissionResult(storage, {
+      missionId: summary.mission.id,
+      level: summary.tier,
+      score: summary.score,
+      targetCount: summary.total,
+      campaign: summary.campaign,
+    });
     hud.log(`Missão encerrada: ${formatScore(summary.score)} pts.`, 'system');
-    hud.showDebrief({ summary, codename, best, isRecord });
+    hud.showDebrief({ summary, codename, best, isRecord, unlocked, testMode });
     setBodyState();
+    if (run) run.summary = summary;
+    submitRun();
+  }
+
+  /** Envia a partida encerrada ao Ranking Global (automático no debriefing). */
+  async function submitRun() {
+    const current = run;
+    const summary = current?.summary;
+    if (!summary || current.submitted || testMode) return;
+    if (summary.score <= 0 || summary.found === 0) {
+      hud.setSubmitStatus({
+        tone: 'warm',
+        text: 'Só pontuações positivas entram no Ranking Global. Tente de novo, agente.',
+      });
+      return;
+    }
+    hud.setSubmitStatus({ tone: 'info', text: 'Enviando ao Ranking Global…' });
+    const started = await current.promise;
+    if (!started?.ok || !started.runId) {
+      hud.setSubmitStatus({
+        tone: 'warm',
+        text: 'A central estava fora do ar quando a missão começou — esta pontuação fica só no seu recorde local.',
+      });
+      return;
+    }
+    const result = await leaderboard.submit({
+      codename,
+      missionId: summary.mission.id,
+      tier: summary.tier,
+      score: summary.score,
+      durationMs: summary.elapsedMs,
+      targetsHit: summary.found,
+      runId: started.runId,
+    });
+    if (run !== current) return;
+    if (result.ok) {
+      current.submitted = true;
+      hud.setSubmitStatus({
+        tone: 'success',
+        text: `Posição #${result.rank} de ${result.total} em ${summary.mission.codename} · Nível ${summary.tier}.${result.personalBest ? '' : ' (Seu melhor resultado anterior continua valendo.)'}`,
+      });
+      return;
+    }
+    const retry = result.offline || result.status === 429;
+    if (result.code === 'duplicate') current.submitted = true;
+    hud.setSubmitStatus({
+      tone: 'warm',
+      text: result.offline
+        ? `Ranking Global indisponível (${result.error}). Recorde local salvo.`
+        : `A central recusou o envio: ${result.error}`,
+      retry,
+    });
   }
 
   // ── Entrada: clique no globo e teclado ─────────────────────────
@@ -555,23 +709,9 @@ export function mountSpyGame({
   if (shouldAutoOpen) openBriefing();
 
   const api = {
-    open: openBriefing,
-    start: (missionId = 'random', name = codename) =>
-      startMission(missionId, name),
-    /** Palpite programático (útil para testes/QA): {lat, lon}. */
-    guess: (lat, lon) =>
-      handleGuess({ lat, lon, height: surfaceHeight(lat, lon) }),
-    hint: useHint,
-    reveal: revealTarget,
-    get state() {
-      return {
-        phase: engine.phase,
-        mission: engine.mission?.id ?? null,
-        step: engine.stepIndex,
-        score: engine.score,
-        target: engine.currentTarget()?.id ?? null,
-      };
-    },
+    open: () => openBriefing(),
+    /** true quando os ganchos de automação estão ativos (ranking desligado). */
+    testMode,
     destroy() {
       releaseGame();
       windowRef.removeEventListener('keydown', onKeyDown, true);
@@ -582,5 +722,34 @@ export function mountSpyGame({
       body.classList.remove('spy-game-open', 'spy-game-playing');
     },
   };
+  if (testMode) {
+    // Ganchos de QA: palpites programáticos e leitura do alvo atual. Só em dev
+    // ou com ?spytest=1 — nesse modo nada é enviado ao Ranking Global.
+    Object.assign(api, {
+      start: (missionId = 'random', name = codename, options = {}) =>
+        startMission({ missionId, ...options }, name),
+      guess: (lat, lon) =>
+        handleGuess({ lat, lon, height: surfaceHeight(lat, lon) }),
+      hint: useHint,
+      reveal: revealTarget,
+    });
+    Object.defineProperty(api, 'state', {
+      enumerable: true,
+      get() {
+        const target = engine.currentTarget();
+        return {
+          phase: engine.phase,
+          mission: engine.mission?.id ?? null,
+          tier: engine.tier,
+          step: engine.stepIndex,
+          score: engine.score,
+          target: target?.id ?? null,
+          targetLat: target?.lat ?? null,
+          targetLon: target?.lon ?? null,
+          radiusM: target?.radiusM ?? null,
+        };
+      },
+    });
+  }
   return api;
 }

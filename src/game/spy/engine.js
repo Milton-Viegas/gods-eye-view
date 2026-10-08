@@ -3,23 +3,43 @@
  * máquina de estados da missão. Sem Cesium e sem DOM — testável em Node.
  */
 
+import {
+  SPY_BASE_SCORING,
+  clampTier,
+  clueFor,
+  effectiveRadius,
+  maxMissionScore,
+  tierRules,
+} from './difficulty.js';
+
 const EARTH_RADIUS_M = 6371008.8;
 const toRad = (deg) => (deg * Math.PI) / 180;
 const toDeg = (rad) => (rad * 180) / Math.PI;
 
-/** Pontuação (ajuste fino do jogo). */
+/**
+ * Pontuação do nível 2 (Agente de Campo), mantida por compatibilidade. As
+ * regras de cada nível ficam em difficulty.js (SPY_TIERS).
+ */
 export const SPY_SCORING = Object.freeze({
-  /** Pontos por alvo encontrado. */
-  base: 500,
-  /** Bônus máximo de tempo por alvo; cai linearmente até zero. */
-  timeBonusMax: 500,
-  /** Segundos até o bônus de tempo zerar. */
-  timeBonusWindowS: 120,
-  /** Penalidade por palpite errado. */
-  wrongPenalty: 50,
-  /** Custo de cada nível de dica. */
-  hintPenalties: Object.freeze([100, 200]),
+  base: SPY_BASE_SCORING.base,
+  timeBonusMax: SPY_BASE_SCORING.timeBonusMax,
+  timeBonusWindowS: tierRules(2).timeBonusWindowS,
+  wrongPenalty: tierRules(2).wrongPenalty,
+  hintPenalties: tierRules(2).hintPenalties,
 });
+
+/** Pontuação efetiva de um nível no formato usado pelo motor. */
+export function scoringForTier(level) {
+  const tier = tierRules(level);
+  return Object.freeze({
+    base: SPY_BASE_SCORING.base,
+    timeBonusMax: SPY_BASE_SCORING.timeBonusMax,
+    timeBonusWindowS: tier.timeBonusWindowS,
+    wrongPenalty: tier.wrongPenalty,
+    hintPenalties: tier.hintPenalties,
+    multiplier: tier.multiplier,
+  });
+}
 
 /** Distância de grande círculo em metros entre dois pontos {lat, lon}. */
 export function distanceMeters(a, b) {
@@ -133,23 +153,26 @@ export function rankFor(score, maxScore) {
 
 /**
  * Máquina de estados de uma partida.
- * @param {{missions: ReadonlyArray<object>, now?: () => number, random?: () => number, scoring?: typeof SPY_SCORING}} options
+ * @param {{missions: ReadonlyArray<object>, now?: () => number, random?: () => number}} options
  */
 export function createSpyEngine({
   missions,
   now = () => Date.now(),
   random = Math.random,
-  scoring = SPY_SCORING,
 }) {
   if (!Array.isArray(missions) || missions.length === 0)
     throw new TypeError('O Modo Espião precisa de pelo menos uma missão');
 
   let state = idleState();
+  let tier = tierRules(1);
+  let scoring = scoringForTier(1);
 
   function idleState() {
     return {
       phase: 'idle',
       mission: null,
+      tier: 1,
+      campaign: true,
       stepIndex: 0,
       score: 0,
       missionStartedAt: 0,
@@ -171,8 +194,16 @@ export function createSpyEngine({
     return end - state.missionStartedAt;
   }
 
+  /** Alvo atual já ajustado ao nível: raio efetivo e pista do nível. */
   function currentTarget() {
-    return state.mission?.targets[state.stepIndex] ?? null;
+    const target = state.mission?.targets[state.stepIndex];
+    if (!target) return null;
+    return {
+      ...target,
+      baseRadiusM: target.radiusM,
+      radiusM: effectiveRadius(target, state.tier),
+      clue: clueFor(target, state.tier),
+    };
   }
 
   function finishStep(result) {
@@ -190,11 +221,22 @@ export function createSpyEngine({
   }
 
   return {
-    /** Inicia uma missão pelo id, ou uma aleatória quando omitido/"random". */
-    start(missionId) {
+    /**
+     * Inicia uma missão pelo id, ou uma aleatória quando omitido/"random".
+     * `tier` (1–5) define raio, bônus, penalidades, dicas e multiplicador; sem
+     * ele vale o nível da própria missão. `pool` restringe o sorteio.
+     */
+    start(missionId, { tier: level, campaign = true, pool } = {}) {
       let mission = missions.find((m) => m.id === missionId);
-      if (!mission) mission = missions[Math.floor(random() * missions.length)];
+      if (!mission) {
+        const candidates = pool?.length ? pool : missions;
+        mission = candidates[Math.floor(random() * candidates.length)];
+      }
       state = idleState();
+      state.tier = clampTier(level ?? mission.tier ?? 1);
+      state.campaign = campaign;
+      tier = tierRules(state.tier);
+      scoring = scoringForTier(state.tier);
       state.phase = 'playing';
       state.mission = mission;
       state.missionStartedAt = now();
@@ -211,7 +253,7 @@ export function createSpyEngine({
       if (temperature.level === 'found') {
         const seconds = (now() - state.stepStartedAt) / 1000;
         const bonus = timeBonus(seconds, scoring);
-        const points = scoring.base + bonus;
+        const points = Math.round((scoring.base + bonus) * scoring.multiplier);
         state.score += points;
         state.found += 1;
         const missionComplete = finishStep({
@@ -250,6 +292,8 @@ export function createSpyEngine({
     hint() {
       const target = currentTarget();
       if (state.phase !== 'playing' || !target) return null;
+      if (scoring.hintPenalties.length === 0)
+        return { level: 0, exhausted: true, unavailable: true, target };
       if (state.stepHints >= scoring.hintPenalties.length)
         return { level: state.stepHints, exhausted: true, target };
       const level = state.stepHints + 1;
@@ -310,6 +354,22 @@ export function createSpyEngine({
     get stepHints() {
       return state.stepHints;
     },
+    /** Nível da partida atual (1–5). */
+    get tier() {
+      return state.tier;
+    },
+    /** Regras do nível atual (SPY_TIERS). */
+    get rules() {
+      return tier;
+    },
+    /** Pontuação efetiva do nível atual. */
+    get scoring() {
+      return scoring;
+    },
+    /** Dicas restantes para o alvo atual. */
+    hintsLeft() {
+      return Math.max(0, scoring.hintPenalties.length - state.stepHints);
+    },
     get score() {
       return state.score;
     },
@@ -323,9 +383,13 @@ export function createSpyEngine({
     /** Resumo para a tela de debriefing. */
     summary() {
       const total = state.mission?.targets.length ?? 0;
-      const maxScore = total * (scoring.base + scoring.timeBonusMax);
+      const maxScore = maxMissionScore(total, state.tier);
       return {
         mission: state.mission,
+        tier: state.tier,
+        tierName: tier.name,
+        multiplier: tier.multiplier,
+        campaign: state.campaign,
         score: state.score,
         maxScore,
         found: state.found,
